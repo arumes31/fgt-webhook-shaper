@@ -1,0 +1,45 @@
+services:
+  shaper:
+    build:
+      context: .
+    init: true
+    restart: unless-stopped
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=8m,mode=1777
+    pids_limit: 128
+    mem_limit: 256m
+    cpus: 0.5
+    ports:
+      - "${LISTEN_ADDRESS:-127.0.0.1}:${LISTEN_PORT:-25001}:25001"
+    environment:
+      WEBHOOK_TOKEN_FILE: /run/secrets/webhook_token
+      WEBHOOK_UUID: ${WEBHOOK_UUID:?WEBHOOK_UUID is required}
+      FORTIGATE_HOST: ${FORTIGATE_HOST:?FORTIGATE_HOST is required}
+      FORTIGATE_PORT: ${FORTIGATE_PORT:-22}
+      FORTIGATE_USER: ${FORTIGATE_USER:?FORTIGATE_USER is required}
+      FORTIGATE_PASSWORD_FILE: /run/secrets/fortigate_password
+      FORTIGATE_KNOWN_HOSTS_FILE: /run/config/fortigate_known_hosts
+      FORTIGATE_POLICY_IDS: ${FORTIGATE_POLICY_IDS:-17,21,22}
+      DISABLE_DELAY_SECONDS: ${DISABLE_DELAY_SECONDS:-120}
+      INACTIVITY_SECONDS: ${INACTIVITY_SECONDS:-7200}
+      SSH_COMMAND_TIMEOUT_SECONDS: ${SSH_COMMAND_TIMEOUT_SECONDS:-15}
+      WEBHOOK_RATE_LIMIT_PER_MINUTE: ${WEBHOOK_RATE_LIMIT_PER_MINUTE:-60}
+    secrets:
+      - webhook_token
+      - fortigate_password
+    volumes:
+      - type: bind
+        source: ./config/fortigate_known_hosts
+        target: /run/config/fortigate_known_hosts
+        read_only: true
+
+secrets:
+  webhook_token:
+    file: ./secrets/webhook_token
+  fortigate_password:
+    file: ./secrets/fortigate_password
