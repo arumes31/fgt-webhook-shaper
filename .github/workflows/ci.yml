@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test and security
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14.7'
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Install hash-locked dependencies
+        run: python -m pip install --require-hashes -r requirements-dev.txt
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Test
+        run: pytest --cov --cov-report=term-missing --cov-fail-under=90
+
+      - name: Scan source
+        run: bandit -c pyproject.toml -r app.py config.py service.py -ll -ii
+
+      - name: Audit dependencies
+        run: pip-audit -r requirements.txt --progress-spinner off
