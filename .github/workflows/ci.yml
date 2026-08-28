@@ -36,7 +36,7 @@ jobs:
         run: ruff check .
 
       - name: Test
-        run: pytest --cov --cov-report=term-missing --cov-fail-under=90
+        run: python -m pytest --cov --cov-report=term-missing --cov-fail-under=90
 
       - name: Scan source
         run: bandit -c pyproject.toml -r app.py config.py service.py -ll -ii
