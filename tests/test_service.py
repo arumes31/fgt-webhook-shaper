@@ -150,7 +150,7 @@ def test_ssh_enforces_pinned_host_keys_and_disables_legacy_rsa(settings):
     with patch("service.paramiko.SSHClient", return_value=client):
         FortiGateSSH(settings).set_enabled(True)
 
-    client.load_host_keys.assert_called_once_with("tests\\fixtures\\known_hosts")
+    client.load_host_keys.assert_called_once_with(str(settings.known_hosts_file))
     assert isinstance(client.set_missing_host_key_policy.call_args.args[0], paramiko.RejectPolicy)
     kwargs = client.connect.call_args.kwargs
     assert kwargs["allow_agent"] is False
