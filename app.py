@@ -8,6 +8,13 @@ import time
 
 app = Flask(__name__)
 
+
+@app.after_request
+def prevent_response_caching(response):
+    response.cache_control.private = True
+    response.cache_control.no_store = True
+    return response
+
 # Custom logging formatter (unchanged)
 class ColoredFormatter(logging.Formatter):
     COLORS = {
