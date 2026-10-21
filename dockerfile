@@ -3,13 +3,16 @@ FROM python:3.9-slim
 WORKDIR /app
 
 # Install required packages
-RUN apt-get update && apt-get install -y \
+ARG RUNTIME_APT_REFRESH=manual
+RUN printf 'Runtime package refresh: %s\n' "$RUNTIME_APT_REFRESH" \
+    && apt-get update && apt-get upgrade -y && apt-get install -y \
     openssh-client \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt \
+    && python -m pip uninstall -y pip setuptools wheel
 
 # Copy application code
 COPY app.py .

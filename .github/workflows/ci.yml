@@ -41,12 +41,19 @@ jobs:
         with:
           context: .
           file: dockerfile
+          build-args: RUNTIME_APT_REFRESH=${{ github.run_id }}-${{ github.run_attempt }}
           load: true
           push: false
           tags: shaper:ci
+      - name: Verify runtime imports and package-manager removal
+        run: >-
+          docker run --rm --entrypoint python shaper:ci -c
+          "import flask, paramiko, gunicorn, importlib.util;
+          assert all(importlib.util.find_spec(name) is None for name in ('pip', 'setuptools', 'wheel'))"
       - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: shaper:ci
+          version: v0.74.0
           scanners: vuln
           severity: HIGH,CRITICAL
           ignore-unfixed: true
