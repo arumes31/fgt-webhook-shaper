@@ -1,5 +1,7 @@
 from flask import Flask, request, jsonify
 import paramiko
+import base64
+import hmac
 import os
 import logging
 from datetime import datetime, timedelta
@@ -43,36 +45,103 @@ handler.setFormatter(ColoredFormatter('%(asctime)s - %(levelname)s - %(message)s
 logging.basicConfig(level=logging.INFO, handlers=[handler])
 logger = logging.getLogger(__name__)
 
-# Environment variables (unchanged)
-WEBHOOK_TOKEN = os.environ.get('WEBHOOK_TOKEN')
+def get_env(name, default=None):
+    """Read a setting from NAME or from the file referenced by NAME_FILE (Docker secrets)"""
+    file_path = os.environ.get(f'{name}_FILE')
+    if file_path:
+        with open(file_path, encoding='utf-8') as f:
+            return f.read().strip()
+    return os.environ.get(name, default)
+
+def require_env(name):
+    value = get_env(name)
+    if not value:
+        logger.error(f"{name} environment variable is required")
+        raise ValueError(f"{name} environment variable is required")
+    return value
+
+def is_true(value):
+    return str(value).strip().lower() in ('1', 'true', 'yes', 'on')
+
+def sanitize(value, max_length=64):
+    """Make untrusted input safe to log (no newlines/control characters, bounded length)"""
+    return repr(str(value)[:max_length])
+
+# Environment variables
+WEBHOOK_TOKEN = require_env('WEBHOOK_TOKEN')
 WEBHOOK_UUID = os.environ.get('WEBHOOK_UUID')
 WEBHOOK_PATH = f"/webhook/{WEBHOOK_UUID}" if WEBHOOK_UUID else "/webhook/default"
 
-if not WEBHOOK_TOKEN:
-    logger.error("WEBHOOK_TOKEN environment variable is required")
-    raise ValueError("WEBHOOK_TOKEN environment variable is required")
+if len(WEBHOOK_TOKEN) < 32:
+    logger.warning("WEBHOOK_TOKEN is shorter than 32 characters, use a long random token")
 if not WEBHOOK_UUID:
     logger.warning("WEBHOOK_UUID not provided, using default path")
 
-FORTIGATE_HOST = os.environ.get('FORTIGATE_HOST', 'fortigate.example.com')
-FORTIGATE_USER = os.environ.get('FORTIGATE_USER', 'admin')
-FORTIGATE_PASSWORD = os.environ.get('FORTIGATE_PASS', 'password')
+# Fortigate connection settings have no defaults so a misconfiguration fails closed
+FORTIGATE_HOST = require_env('FORTIGATE_HOST')
+FORTIGATE_USER = require_env('FORTIGATE_USER')
+FORTIGATE_KEY_FILE = get_env('FORTIGATE_KEY_FILE')  # Optional private key for key-based auth
+FORTIGATE_PASSWORD = get_env('FORTIGATE_PASS') if FORTIGATE_KEY_FILE else require_env('FORTIGATE_PASS')
 FORTIGATE_PORT = int(os.environ.get('FORTIGATE_PORT', 22))
+
+# Host key pinning: a known_hosts file and/or a single "<key-type> <base64-key>" entry
+FORTIGATE_KNOWN_HOSTS = get_env('FORTIGATE_KNOWN_HOSTS')
+FORTIGATE_HOSTKEY = get_env('FORTIGATE_HOSTKEY')
+FORTIGATE_INSECURE_SKIP_HOSTKEY_CHECK = is_true(os.environ.get('FORTIGATE_INSECURE_SKIP_HOSTKEY_CHECK', 'false'))
+
+if FORTIGATE_INSECURE_SKIP_HOSTKEY_CHECK:
+    logger.warning("FORTIGATE_INSECURE_SKIP_HOSTKEY_CHECK is enabled, the Fortigate host key is NOT verified")
+elif not FORTIGATE_KNOWN_HOSTS and not FORTIGATE_HOSTKEY:
+    logger.error("FORTIGATE_KNOWN_HOSTS or FORTIGATE_HOSTKEY is required to verify the Fortigate host key")
+    raise ValueError("FORTIGATE_KNOWN_HOSTS or FORTIGATE_HOSTKEY is required to verify the Fortigate host key")
+
+def parse_host_key(value):
+    """Parse "<key-type> <base64-key>" (optionally prefixed by a host like a known_hosts line)"""
+    if not value:
+        return None
+    parts = value.split()
+    for i in range(len(parts) - 1):
+        try:
+            return paramiko.PKey.from_type_string(parts[i], base64.b64decode(parts[i + 1]))
+        except Exception:
+            continue
+    logger.error("FORTIGATE_HOSTKEY is not a valid '<key-type> <base64-key>' entry")
+    raise ValueError("FORTIGATE_HOSTKEY is not a valid '<key-type> <base64-key>' entry")
+
+FORTIGATE_PINNED_KEY = parse_host_key(FORTIGATE_HOSTKEY)
+
+DISABLE_DELAY_SECONDS = 120  # 2 minutes
 
 # Global variables
 last_event_time = datetime.now()
-resume_event = threading.Event()  # To signal resume has occurred
+disable_timer = None  # Pending delayed disable, replaced or cancelled on every event
+disable_timer_lock = threading.Lock()
+
+def configure_host_keys(ssh):
+    """Pin the Fortigate host key and reject any unknown key"""
+    if FORTIGATE_INSECURE_SKIP_HOSTKEY_CHECK:
+        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        return
+    if FORTIGATE_KNOWN_HOSTS:
+        ssh.load_host_keys(FORTIGATE_KNOWN_HOSTS)
+    if FORTIGATE_PINNED_KEY:
+        host = FORTIGATE_HOST if FORTIGATE_PORT == 22 else f"[{FORTIGATE_HOST}]:{FORTIGATE_PORT}"
+        ssh.get_host_keys().add(host, FORTIGATE_PINNED_KEY.get_name(), FORTIGATE_PINNED_KEY)
+    ssh.set_missing_host_key_policy(paramiko.RejectPolicy())
 
 def ssh_execute_command(command):
     try:
         ssh = paramiko.SSHClient()
-        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        configure_host_keys(ssh)
         logger.info(f"Connecting to Fortigate at {FORTIGATE_HOST}:{FORTIGATE_PORT}")
         ssh.connect(
             FORTIGATE_HOST,
             port=FORTIGATE_PORT,
             username=FORTIGATE_USER,
             password=FORTIGATE_PASSWORD,
+            key_filename=FORTIGATE_KEY_FILE,
+            look_for_keys=False,
+            allow_agent=False,
             timeout=10
         )
         logger.info(f"Executing command: {command.strip()}")
@@ -116,22 +185,34 @@ end"""
                 logger.error(f"Inactivity timeout failed: {response['error']}")
             last_event_time = datetime.now()
 
+def cancel_delayed_disable():
+    """Cancel the pending delayed disable, if any"""
+    global disable_timer
+    with disable_timer_lock:
+        if disable_timer is not None:
+            disable_timer.cancel()
+            disable_timer = None
+            logger.info("Pending delayed disable cancelled due to playback_resume")
+
+def schedule_delayed_disable(event, wan_streams):
+    """Start the single delayed disable timer, replacing any pending one"""
+    global disable_timer
+    with disable_timer_lock:
+        if disable_timer is not None:
+            disable_timer.cancel()
+        logger.info(f"Starting 2-minute delay for {event} with wan_streams={wan_streams}")
+        disable_timer = threading.Timer(DISABLE_DELAY_SECONDS, delayed_disable, args=(event, wan_streams))
+        disable_timer.daemon = True
+        disable_timer.start()
+
 def delayed_disable(event, wan_streams):
-    """Handle delayed disable with instant cancellation on resume"""
-    logger.info(f"Starting 2-minute delay for {event} with wan_streams={wan_streams}")
-    resume_event.clear()  # Reset the resume flag
-    delay_seconds = 120  # 2 minutes
-    elapsed = 0
+    """Disable shaping once the delay expired without a resume"""
+    global disable_timer
+    with disable_timer_lock:
+        if disable_timer is not threading.current_thread():
+            return  # Cancelled or superseded by a newer timer
+        disable_timer = None
 
-    # Check every second to allow instant cancellation
-    while elapsed < delay_seconds:
-        if resume_event.is_set():
-            logger.info(f"{event} cancelled due to playback_resume")
-            return
-        time.sleep(1)  # Wait 1 second at a time
-        elapsed += 1
-
-    # If we reach here, no resume occurred within 2 minutes
     logger.info(f"Executing disable after 2-minute delay for {event}")
     command = """config firewall shaping-policy
 edit 17
@@ -153,33 +234,32 @@ end"""
 @app.route(WEBHOOK_PATH, methods=['POST'])
 def webhook():
     global last_event_time
-    
+
     auth_token = request.headers.get('X-Webhook-Token')
-    if not auth_token or auth_token != WEBHOOK_TOKEN:
+    if not auth_token or not hmac.compare_digest(auth_token.encode(), WEBHOOK_TOKEN.encode()):
         logger.warning(f"Unauthorized access attempt to {WEBHOOK_PATH}")
         return jsonify({'error': 'Unauthorized'}), 401
 
     request_data = request.get_json(silent=True)
-    x_forwarded_for = request.headers.get('X-Forwarded-For', 'Not provided')
-    logger.info(f"Incoming webhook request JSON: {request_data}, X-Forwarded-For: {x_forwarded_for}")
-    
-    if not request_data or 'event' not in request_data:
+
+    if not isinstance(request_data, dict) or not isinstance(request_data.get('event'), str):
         logger.warning("Invalid request received: missing event or invalid JSON")
         return jsonify({'error': 'Invalid request'}), 400
 
     event = request_data['event'].lower()
+    logger.info(f"Incoming webhook event: {sanitize(event)}")
     wan_streams = request_data.get('wan_streams', 0)
     try:
         wan_streams = int(wan_streams)
     except (ValueError, TypeError):
-        logger.warning(f"Invalid wan_streams value: {wan_streams}, treating as 0")
+        logger.warning(f"Invalid wan_streams value: {sanitize(wan_streams)}, treating as 0")
         wan_streams = 0
 
     last_event_time = datetime.now()
 
     if event in ['playback_start', 'playback_resume']:
         logger.info(f"Processing enable event: {event}")
-        resume_event.set()  # Signal that a resume has occurred, cancelling any delayed disable
+        cancel_delayed_disable()
         command = """config firewall shaping-policy
 edit 17
 set status enable
@@ -193,9 +273,9 @@ next
 end"""
         response = ssh_execute_command(command)
         if response.get('success'):
-            return jsonify({'message': f'Event {event} executed successfully', 'output': response['output']}), 200
+            return jsonify({'message': f'Event {event} executed successfully'}), 200
         else:
-            return jsonify({'error': response['error']}), 500
+            return jsonify({'error': 'Failed to update Fortigate shaping policy'}), 500
 
     elif event == 'playback_pause':
         if wan_streams > 1:
@@ -203,7 +283,7 @@ end"""
             return jsonify({'message': f'Event {event} ignored due to active wan_streams: {wan_streams}'}), 200
         else:
             logger.info(f"Triggering delayed disable for {event} with wan_streams={wan_streams}")
-            threading.Thread(target=delayed_disable, args=(event, wan_streams), daemon=True).start()
+            schedule_delayed_disable(event, wan_streams)
             return jsonify({'message': f'Event {event} scheduled for disable after 2-minute delay'}), 200
 
     elif event == 'playback_stop':
@@ -212,12 +292,12 @@ end"""
             return jsonify({'message': f'Event {event} ignored due to active wan_streams: {wan_streams}'}), 200
         else:
             logger.info(f"Triggering delayed disable for {event} with wan_streams={wan_streams}")
-            threading.Thread(target=delayed_disable, args=(event, wan_streams), daemon=True).start()
+            schedule_delayed_disable(event, wan_streams)
             return jsonify({'message': f'Event {event} scheduled for disable after 2-minute delay'}), 200
 
     else:
-        logger.info(f"Ignoring unhandled event: {event}")
-        return jsonify({'message': f'Event {event} ignored'}), 200
+        logger.info(f"Ignoring unhandled event: {sanitize(event)}")
+        return jsonify({'message': 'Event ignored'}), 200
 
 # Start inactivity checker (unchanged)
 inactivity_thread = threading.Thread(target=check_inactivity, daemon=True)
@@ -227,4 +307,3 @@ logger.info("Inactivity checker thread started")
 if __name__ == '__main__':
     logger.info("Starting webhook server...")
     logger.info(f"Webhook endpoint: {WEBHOOK_PATH}")
-    logger.info(f"Webhook token: {WEBHOOK_TOKEN}")
