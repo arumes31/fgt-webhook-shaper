@@ -60,9 +60,6 @@ def require_env(name):
         raise ValueError(f"{name} environment variable is required")
     return value
 
-def is_true(value):
-    return str(value).strip().lower() in ('1', 'true', 'yes', 'on')
-
 def sanitize(value, max_length=64):
     """Make untrusted input safe to log (no newlines/control characters, bounded length)"""
     return repr(str(value)[:max_length])
@@ -87,11 +84,8 @@ FORTIGATE_PORT = int(os.environ.get('FORTIGATE_PORT', 22))
 # Host key pinning: a known_hosts file and/or a single "<key-type> <base64-key>" entry
 FORTIGATE_KNOWN_HOSTS = get_env('FORTIGATE_KNOWN_HOSTS')
 FORTIGATE_HOSTKEY = get_env('FORTIGATE_HOSTKEY')
-FORTIGATE_INSECURE_SKIP_HOSTKEY_CHECK = is_true(os.environ.get('FORTIGATE_INSECURE_SKIP_HOSTKEY_CHECK', 'false'))
 
-if FORTIGATE_INSECURE_SKIP_HOSTKEY_CHECK:
-    logger.warning("FORTIGATE_INSECURE_SKIP_HOSTKEY_CHECK is enabled, the Fortigate host key is NOT verified")
-elif not FORTIGATE_KNOWN_HOSTS and not FORTIGATE_HOSTKEY:
+if not FORTIGATE_KNOWN_HOSTS and not FORTIGATE_HOSTKEY:
     logger.error("FORTIGATE_KNOWN_HOSTS or FORTIGATE_HOSTKEY is required to verify the Fortigate host key")
     raise ValueError("FORTIGATE_KNOWN_HOSTS or FORTIGATE_HOSTKEY is required to verify the Fortigate host key")
 
@@ -119,9 +113,6 @@ disable_timer_lock = threading.Lock()
 
 def configure_host_keys(ssh):
     """Pin the Fortigate host key and reject any unknown key"""
-    if FORTIGATE_INSECURE_SKIP_HOSTKEY_CHECK:
-        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        return
     if FORTIGATE_KNOWN_HOSTS:
         ssh.load_host_keys(FORTIGATE_KNOWN_HOSTS)
     if FORTIGATE_PINNED_KEY:
