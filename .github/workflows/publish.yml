@@ -39,6 +39,7 @@ jobs:
         with:
           context: .
           file: dockerfile
+          build-args: RUNTIME_APT_REFRESH=${{ github.run_id }}-${{ github.run_attempt }}
           push: true
           tags: ghcr.io/${{ github.repository }}:candidate-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           provenance: mode=max
@@ -49,6 +50,7 @@ jobs:
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: ghcr.io/${{ github.repository }}@${{ steps.build.outputs.digest }}
+          version: v0.74.0
           scanners: vuln
           severity: HIGH,CRITICAL
           ignore-unfixed: true
