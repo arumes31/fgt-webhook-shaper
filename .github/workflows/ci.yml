@@ -23,7 +23,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
-          python-version: '3.9'
+          python-version: '3.13'
           cache: pip
       - run: python -m pip install -r requirements.txt pip-audit
       - run: python -m unittest discover -v
@@ -36,17 +36,24 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: dockerfile
+          build-args: RUNTIME_APT_REFRESH=${{ github.run_id }}-${{ github.run_attempt }}
           load: true
           push: false
           tags: shaper:ci
+      - name: Verify runtime imports and package-manager removal
+        run: >-
+          docker run --rm --entrypoint python shaper:ci -c
+          "import flask, paramiko, gunicorn, importlib.util;
+          assert all(importlib.util.find_spec(name) is None for name in ('pip', 'setuptools', 'wheel'))"
       - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: shaper:ci
+          version: v0.74.0
           scanners: vuln
           severity: HIGH,CRITICAL
           ignore-unfixed: true
