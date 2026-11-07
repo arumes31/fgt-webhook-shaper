@@ -1,0 +1,8 @@
+﻿.claudeignore
+.stfolder/
+.stignore
+__pycache__/
+*.pyc
+
+# Documentation (synced to DocDR, not tracked in git)
+docs/
