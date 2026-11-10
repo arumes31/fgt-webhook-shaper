@@ -81,8 +81,9 @@ FORTIGATE_KEY_FILE = get_env('FORTIGATE_KEY_FILE')  # Optional private key for k
 FORTIGATE_PASSWORD = get_env('FORTIGATE_PASS') if FORTIGATE_KEY_FILE else require_env('FORTIGATE_PASS')
 FORTIGATE_PORT = int(os.environ.get('FORTIGATE_PORT', 22))
 
-# Host key pinning: a known_hosts file and/or a single "<key-type> <base64-key>" entry
-FORTIGATE_KNOWN_HOSTS = get_env('FORTIGATE_KNOWN_HOSTS')
+# Host key pinning: a known_hosts file and/or a single "<key-type> <base64-key>" entry.
+# FORTIGATE_KNOWN_HOSTS(_FILE) is a path to a known_hosts file, so it is not read through get_env
+FORTIGATE_KNOWN_HOSTS = os.environ.get('FORTIGATE_KNOWN_HOSTS_FILE') or os.environ.get('FORTIGATE_KNOWN_HOSTS')
 FORTIGATE_HOSTKEY = get_env('FORTIGATE_HOSTKEY')
 
 if not FORTIGATE_KNOWN_HOSTS and not FORTIGATE_HOSTKEY:
@@ -105,6 +106,7 @@ def parse_host_key(value):
 FORTIGATE_PINNED_KEY = parse_host_key(FORTIGATE_HOSTKEY)
 
 DISABLE_DELAY_SECONDS = 120  # 2 minutes
+HANDLED_EVENTS = ('playback_start', 'playback_resume', 'playback_pause', 'playback_stop')
 
 # Global variables
 last_event_time = datetime.now()
@@ -140,10 +142,12 @@ def ssh_execute_command(command):
         output = stdout.read().decode()
         error = stderr.read().decode()
         ssh.close()
+        # Device output can contain configuration details, so keep it out of the default log level
         if output:
-            logger.info(f"Command output: {output}")
+            logger.debug(f"Command output: {output}")
         if error:
-            logger.error(f"Command error: {error}")
+            logger.error("Fortigate returned output on stderr")
+            logger.debug(f"Command error: {error}")
         return {'success': True, 'output': output, 'error': error}
     except Exception as e:
         logger.error(f"SSH execution failed: {str(e)}")
@@ -246,7 +250,9 @@ def webhook():
         logger.warning(f"Invalid wan_streams value: {sanitize(wan_streams)}, treating as 0")
         wan_streams = 0
 
-    last_event_time = datetime.now()
+    if event in HANDLED_EVENTS:
+        # Only recognised events count as activity, so no-op events cannot hold off the inactivity watchdog
+        last_event_time = datetime.now()
 
     if event in ['playback_start', 'playback_resume']:
         logger.info(f"Processing enable event: {event}")
