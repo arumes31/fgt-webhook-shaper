@@ -4,6 +4,11 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    # Keeps codeql-action init/autobuild/analyze bumps in one PR (split PRs
+    # fail CodeQL on the version mismatch) and all action bumps together.
+    groups:
+      github-actions:
+        patterns: ["*"]
   - package-ecosystem: docker
     directory: /
     schedule:
@@ -12,3 +17,6 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    groups:
+      pip-minor-patch:
+        update-types: [minor, patch]
