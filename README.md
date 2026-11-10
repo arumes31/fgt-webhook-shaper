@@ -138,7 +138,7 @@ The webhook is authenticated only by the static `X-Webhook-Token` header, and th
 
 ## Docker Deployment
 
-Example `docker-compose.yml` using Docker secrets:
+Example `docker-compose.yml` using Docker secrets. It publishes the plain-HTTP port on the host's loopback address only, for a Tautulli instance or TLS reverse proxy on the same host. For a client on another host or in a separate container, publish on a trusted host address or use a shared trusted Docker network instead, and restrict network access to the webhook (see [Transport Security](#transport-security)). Docker releases before 28.0.0 can expose loopback-published ports to hosts on the same L2 network.
 
 ```yaml
 services:
@@ -147,7 +147,7 @@ services:
     container_name: fgt-webhook-shaper
     restart: unless-stopped
     ports:
-      - "25001:25001"
+      - "127.0.0.1:25001:25001"
     environment:
       - WEBHOOK_TOKEN_FILE=/run/secrets/webhook_token
       - WEBHOOK_UUID=my-custom-uuid-12345
