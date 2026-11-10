@@ -46,7 +46,7 @@ sequenceDiagram
 - **`playback_stop`:**
   - If `wan_streams >= 1`: Ignored (other remote streams are active).
   - If `wan_streams == 0`: Schedules a 2-minute (120 s) delayed disable.
-- **Inactivity Watchdog:** A background thread checks every 5 minutes. If no webhook event has arrived for 2 hours, it automatically sends a disable command to FortiGate as a safety measure.
+- **Inactivity Watchdog:** A background thread checks every 5 minutes. If no recognised playback event (`playback_*`) has arrived for 2 hours (unknown events do not count as activity), it automatically sends a disable command to FortiGate as a safety measure.
 
 ## Configuration & Environment Variables
 
@@ -62,7 +62,7 @@ All settings support Docker secrets using the `_FILE` suffix (e.g. `FORTIGATE_PA
 | `FORTIGATE_PASS` | Conditional | — | SSH password. Required if `FORTIGATE_KEY_FILE` is not set. Supports `FORTIGATE_PASS_FILE`. |
 | `FORTIGATE_KEY_FILE`| Conditional | — | Path to SSH private key file for key-based authentication. |
 | `FORTIGATE_HOSTKEY` | Conditional | — | Pinned FortiGate public host key in format `<key-type> <base64-key>` (e.g. `ssh-ed25519 AAAAC3...`). Required unless `FORTIGATE_KNOWN_HOSTS` is specified. Supports `FORTIGATE_HOSTKEY_FILE`. |
-| `FORTIGATE_KNOWN_HOSTS` | Conditional | — | Path to a `known_hosts` file for verifying FortiGate host keys. Supports `FORTIGATE_KNOWN_HOSTS_FILE`. |
+| `FORTIGATE_KNOWN_HOSTS` | Conditional | — | Path to a `known_hosts` file for verifying FortiGate host keys. `FORTIGATE_KNOWN_HOSTS_FILE` is accepted as an alias and is also treated as the path of the `known_hosts` file (e.g. a Docker secret mounted at `/run/secrets/fgt_known_hosts`). |
 
 ### Host Key Pinning
 
@@ -101,11 +101,18 @@ X-Webhook-Token: <your-webhook-token>
 - `event` (string, required): One of `playback_start`, `playback_resume`, `playback_pause`, `playback_stop`.
 - `wan_streams` (integer, optional): Count of active WAN streams.
 
+### Transport Security
+
+The webhook is authenticated only by the static `X-Webhook-Token` header, and the container itself serves plain HTTP. Anyone who can observe a request can replay it, so:
+
+- Do not expose port `25001` to untrusted networks. Keep the shaper on the same trusted host or network segment as Tautulli, or put it behind a TLS-terminating reverse proxy (Traefik, Caddy, nginx) and use an `https://` webhook URL.
+- Use a long random `WEBHOOK_TOKEN` and a random `WEBHOOK_UUID`, and rotate the token if it may have been exposed.
+
 ## Tautulli Setup
 
 1. In Tautulli, navigate to **Settings** > **Notification Agents** > **Add a new notification agent** > **Webhook**.
 2. **Configuration:**
-   - **Webhook URL:** `http://<shaper-host>:25001/webhook/<WEBHOOK_UUID>`
+   - **Webhook URL:** `http://<shaper-host>:25001/webhook/<WEBHOOK_UUID>` (or `https://...` through your reverse proxy, see [Transport Security](#transport-security))
    - **Webhook Method:** `POST`
    - **Description:** `FortiGate Webhook Shaper`
 3. **Headers:**
@@ -131,7 +138,7 @@ X-Webhook-Token: <your-webhook-token>
 
 ## Docker Deployment
 
-Example `docker-compose.yml` using Docker secrets:
+Example `docker-compose.yml` using Docker secrets. It publishes the plain-HTTP port on the host's loopback address only, for a Tautulli instance or TLS reverse proxy on the same host. For a client on another host or in a separate container, publish on a trusted host address or use a shared trusted Docker network instead, and restrict network access to the webhook (see [Transport Security](#transport-security)). Docker releases before 28.0.0 can expose loopback-published ports to hosts on the same L2 network.
 
 ```yaml
 services:
@@ -140,7 +147,7 @@ services:
     container_name: fgt-webhook-shaper
     restart: unless-stopped
     ports:
-      - "25001:25001"
+      - "127.0.0.1:25001:25001"
     environment:
       - WEBHOOK_TOKEN_FILE=/run/secrets/webhook_token
       - WEBHOOK_UUID=my-custom-uuid-12345

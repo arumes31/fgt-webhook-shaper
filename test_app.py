@@ -80,6 +80,26 @@ class WebhookTests(unittest.TestCase):
             self.assertEqual(timer.return_value.cancel.call_count, 3)
             self.assertIsNone(webhook.disable_timer)
 
+    def test_only_handled_events_refresh_inactivity_watchdog(self):
+        stale = webhook.datetime(2000, 1, 1)
+        webhook.last_event_time = stale
+        response = self.client.post("/webhook/test", json={"event": "ping"}, headers=AUTH)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(webhook.last_event_time, stale)
+
+        with patch.object(webhook.threading, "Timer", autospec=True):
+            self.client.post("/webhook/test", json={"event": "playback_stop", "wan_streams": 0}, headers=AUTH)
+        self.assertGreater(webhook.last_event_time, stale)
+
+    def test_device_output_is_not_logged_at_info(self):
+        with patch.object(webhook.paramiko, "SSHClient", autospec=True) as client:
+            ssh = client.return_value
+            ssh.get_host_keys.return_value = paramiko.HostKeys()
+            ssh.exec_command.return_value = (None, io.BytesIO(b"secret-config"), io.BytesIO(b"secret-err"))
+            with self.assertLogs(webhook.logger, level="INFO") as logs:
+                webhook.ssh_execute_command("get system status")
+            self.assertNotIn("secret", " ".join(logs.output))
+
     def test_superseded_timer_does_not_disable(self):
         with patch.object(webhook, "ssh_execute_command") as ssh_execute:
             webhook.delayed_disable("playback_stop", 0)
@@ -99,6 +119,17 @@ class ConfigTests(unittest.TestCase):
                 importlib.reload(webhook)
         with patch.dict(os.environ, ENV, clear=True), patch("threading.Thread.start"):
             importlib.reload(webhook)
+
+    def test_known_hosts_file_variable_is_used_as_a_path(self):
+        env = {k: v for k, v in ENV.items() if k != "FORTIGATE_HOSTKEY"}
+        env["FORTIGATE_KNOWN_HOSTS_FILE"] = os.path.join(os.path.dirname(__file__), "missing_known_hosts")
+        try:
+            with patch.dict(os.environ, env, clear=True), patch("threading.Thread.start"):
+                importlib.reload(webhook)
+                self.assertEqual(webhook.FORTIGATE_KNOWN_HOSTS, env["FORTIGATE_KNOWN_HOSTS_FILE"])
+        finally:
+            with patch.dict(os.environ, ENV, clear=True), patch("threading.Thread.start"):
+                importlib.reload(webhook)
 
 
 if __name__ == "__main__":
