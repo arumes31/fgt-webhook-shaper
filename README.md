@@ -1,8 +1,8 @@
 # FortiGate Webhook Shaper
 
-A lightweight Flask/Gunicorn microservice that dynamically toggles FortiGate firewall traffic shaping policies over SSH in response to media streaming webhooks (e.g. from Tautulli or Plex).
+A lightweight Flask/Gunicorn microservice that dynamically toggles FortiGate firewall traffic shaping policies over SSH in response to playback webhooks from Tautulli or another sender that uses the [payload format below](#webhook-payload--api). Native Plex webhook payloads need an adapter.
 
-When WAN media playback starts or resumes, the shaper enables prioritized traffic shaping policies on your FortiGate firewall. When playback pauses or stops, the service gracefully schedules a delayed disable (with automatic timer cancellation if playback resumes within 2 minutes).
+When WAN media playback starts or resumes, the shaper enables prioritized traffic shaping policies on your FortiGate firewall. When the last WAN stream pauses or stops, the service schedules a delayed disable. A new start or resume cancels the timer.
 
 ## Architecture & Event Semantics
 
@@ -19,7 +19,7 @@ sequenceDiagram
     S-->>T: 200 OK
 
     T->>S: POST /webhook/{UUID} (playback_pause / stop)
-    alt Multiple WAN streams still active
+    alt Another WAN stream is still active
         Note over S: Ignores event, keeping shaping active
         S-->>T: 200 OK (ignored)
     else No other WAN streams
@@ -99,7 +99,7 @@ X-Webhook-Token: <your-webhook-token>
 ```
 
 - `event` (string, required): One of `playback_start`, `playback_resume`, `playback_pause`, `playback_stop`.
-- `wan_streams` (integer, optional): Count of active WAN streams.
+- `wan_streams` (integer, optional, defaults to `0`): For pause, include the stream that paused. For stop, count only the remaining WAN streams. Always send this count for pause and stop; omitting it can schedule a disable while other streams are active.
 
 ### Transport Security
 
@@ -111,30 +111,25 @@ The webhook is authenticated only by the static `X-Webhook-Token` header, and th
 ## Tautulli Setup
 
 1. In Tautulli, navigate to **Settings** > **Notification Agents** > **Add a new notification agent** > **Webhook**.
-2. **Configuration:**
-   - **Webhook URL:** `http://<shaper-host>:25001/webhook/<WEBHOOK_UUID>` (or `https://...` through your reverse proxy, see [Transport Security](#transport-security))
-   - **Webhook Method:** `POST`
-   - **Description:** `FortiGate Webhook Shaper`
-3. **Headers:**
+2. In **Configuration**, set **Webhook Method** to `POST` and **Webhook URL** to `http://<shaper-host>:25001/webhook/<WEBHOOK_UUID>`. Use `/webhook/default` if `WEBHOOK_UUID` is unset, or an `https://` URL through your reverse proxy (see [Transport Security](#transport-security)).
+3. In **Triggers**, enable **Playback Start**, **Playback Resume**, **Playback Pause**, and **Playback Stop**.
+4. In **Conditions**, set **Stream Location** **is** `wan` so local playback doesn't change WAN shaping.
+5. In **Data**, expand each of the four triggers. Set **JSON Headers** for each trigger to:
    ```json
    {
      "X-Webhook-Token": "<your-secret-token>"
    }
    ```
-4. **Triggers:**
-   - Check `Playback Start`
-   - Check `Playback Stop`
-   - Check `Playback Pause`
-   - Check `Playback Resume`
-5. **Data:**
-   - Under **JSON Data**, set:
-     ```json
-     {
-       "event": "{action}",
-       "wan_streams": {wan_bandwidth}
-     }
-     ```
-     *(Or pass `{stream_count}` or `{session_count}` depending on your stream tracking requirements).*
+   In the same trigger, set **JSON Data** as follows:
+
+   | Trigger | JSON Data |
+   | --- | --- |
+   | Playback Start | `{"event":"playback_start","wan_streams":{wan_streams}}` |
+   | Playback Resume | `{"event":"playback_resume","wan_streams":{wan_streams}}` |
+   | Playback Pause | `{"event":"playback_pause","wan_streams":{wan_streams}}` |
+   | Playback Stop | `{"event":"playback_stop","wan_streams":{wan_streams}}` |
+
+   Keep `{wan_streams}` unquoted so Tautulli sends a number. It counts WAN streams; `{wan_bandwidth}` is reserved bandwidth in kbps. For Playback Stop, Tautulli excludes the session that just ended. Use the literal event names above: `{action}` produces names such as `play`, which the shaper ignores even though it returns HTTP 200.
 
 ## Docker Deployment
 
