@@ -46,7 +46,7 @@ sequenceDiagram
 - **`playback_stop`:**
   - If `wan_streams >= 1`: Ignored (other remote streams are active).
   - If `wan_streams == 0`: Schedules a 2-minute (120 s) delayed disable.
-- **Inactivity Watchdog:** A background thread checks every 5 minutes. If no recognised playback event (`playback_*`) has arrived for 2 hours (unknown events do not count as activity), it automatically sends a disable command to FortiGate as a safety measure.
+- **Inactivity Watchdog:** A background thread checks every 5 minutes. If no recognised playback event (`playback_*`) has arrived for 2 hours (unknown events do not count as activity), it automatically sends a disable command to FortiGate as a safety measure. An uninterrupted WAN stream can therefore lose traffic priority after two hours without a recognized webhook, even while playback continues.
 
 ## Configuration & Environment Variables
 
